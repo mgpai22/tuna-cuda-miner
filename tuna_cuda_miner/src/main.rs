@@ -9,7 +9,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 use cardano_multiplatform_lib::{self, plutus::{encode_json_str_to_plutus_datum, PlutusDatumSchema}};
 use serde::Serialize;
-use sha2::Digest;
 use regex::Regex;
 use rand::RngCore;
 use reqwest::{self, Error};
@@ -18,6 +17,8 @@ use arrayref::array_ref;
 
 const BLOCK_SIZE: u32 = 256;
 const NUMBLOCKS: u32 = 163834;
+const ITERATIONS_PER_KERNEL: u32 = 100;
+const IDX_MULTIPLIER: u64 = (NUMBLOCKS * BLOCK_SIZE * ITERATIONS_PER_KERNEL) as u64;
 
 fn main() -> Result<(), rustacuda::error::CudaError> {
     rustacuda::init(CudaFlags::empty())?;
@@ -125,9 +126,13 @@ fn worker(json: &str, tx: mpsc::Sender<FoundAnswerResponse>, stream: &Stream) {
     let module_data = CString::new(include_str!("../resources/main.ptx")).unwrap();
     let module = Module::load_from_string(&module_data).unwrap();
 
-    //Kernel Execution
-    unsafe {
-        launch!(module.sha256_kernel<<<NUMBLOCKS, BLOCK_SIZE, 0, stream>>>(
+    let mut g_found_host: u32 = 0;
+    while g_found_host == 0 {
+        g_nonce_low = DeviceBox::new(&nonce_low).unwrap();
+        g_nonce_high = DeviceBox::new(&nonce_high).unwrap();
+        // Kernel Execution
+        unsafe {
+            launch!(module.sha256_kernel<<<NUMBLOCKS, BLOCK_SIZE, 0, stream>>>(
             g_nonce_low.as_device_ptr(),
             g_nonce_high.as_device_ptr(),
             g_hash_out.as_device_ptr(),
@@ -139,12 +144,19 @@ fn worker(json: &str, tx: mpsc::Sender<FoundAnswerResponse>, stream: &Stream) {
             nonce_high
         )).unwrap();
 
-        // Record the event
-        event.record(&stream).unwrap();
-    }
+            // Record the event
+            event.record(&stream).unwrap();
+        }
 
-    // Block until the event is complete
-    event.synchronize().unwrap();
+        // Block until the event is complete
+        event.synchronize().unwrap();
+        g_found.copy_to(&mut g_found_host).unwrap();
+
+        nonce_low += IDX_MULTIPLIER;
+        if nonce_low < IDX_MULTIPLIER {
+            nonce_high += 1;
+        }
+    }
 
     // Copy the data back to the host
     let mut host_nonce_low: u64 = 0;
