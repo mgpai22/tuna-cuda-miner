@@ -13,12 +13,15 @@ use regex::Regex;
 use rand::RngCore;
 use reqwest::{self, Error};
 use arrayref::array_ref;
+use std::time::Instant;
 
 
 const BLOCK_SIZE: u32 = 256;
 const NUMBLOCKS: u32 = 163834;
 const ITERATIONS_PER_KERNEL: u32 = 100;
 const IDX_MULTIPLIER: u64 = (NUMBLOCKS * BLOCK_SIZE * ITERATIONS_PER_KERNEL) as u64;
+
+const SHOW_INTERVAL_MS: u128 = 2000;
 
 fn main() -> Result<(), rustacuda::error::CudaError> {
     rustacuda::init(CudaFlags::empty())?;
@@ -35,6 +38,13 @@ fn main() -> Result<(), rustacuda::error::CudaError> {
     let (tx, rx) = mpsc::channel();
 
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
+
+    let mut nonce_low: u64 = 0;
+    let mut nonce_high: u64 = 0;
+    let mut last_nonce_since_update: u64 = 0;
+
+    let start_time = Instant::now();
+    let mut last_time_state_updated = Instant::now();
 
     loop {
         let (json_update, _) = fetch_url(&server_url_arg).unwrap();
@@ -79,6 +89,14 @@ struct FoundAnswerResponse {
 }
 
 fn worker(json: &str, tx: mpsc::Sender<FoundAnswerResponse>, stream: &Stream) {
+
+    let start_time = Instant::now();
+    let mut last_time_state_updated = Instant::now();
+    let mut nonce_low: u64 = 0;
+    let mut nonce_high: u64 = 0;
+    let mut last_nonce_since_update: u64 = 0;
+
+
     let fields = extract_fields(json);
 
     let result = encode_json_str_to_plutus_datum(json, PlutusDatumSchema::DetailedSchema).unwrap();
@@ -155,6 +173,21 @@ fn worker(json: &str, tx: mpsc::Sender<FoundAnswerResponse>, stream: &Stream) {
         nonce_low += IDX_MULTIPLIER;
         if nonce_low < IDX_MULTIPLIER {
             nonce_high += 1;
+        }
+
+        let now = Instant::now();
+        let duration_since_last_update = now.duration_since(last_time_state_updated);
+        if duration_since_last_update.as_millis() > SHOW_INTERVAL_MS {
+            let total_duration = now.duration_since(last_time_state_updated);
+            let total_duration_in_seconds = total_duration.as_secs() as f64 +
+                total_duration.subsec_millis() as f64 * 1e-3;
+            let hash_rate = (nonce_low - last_nonce_since_update) as f64 /
+                total_duration_in_seconds;
+
+            println!("Hash rate: {} hash(es)/s", hash_rate);
+
+            last_nonce_since_update = nonce_low;
+            last_time_state_updated = now;
         }
     }
 
