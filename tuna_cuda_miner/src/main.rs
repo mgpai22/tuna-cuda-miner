@@ -161,13 +161,18 @@ fn worker(json: &str, tx: mpsc::Sender<FoundAnswerResponse>, stream: &Stream) {
     let mut host_found: u32 = 0;
     g_found.copy_to(&mut host_found).unwrap();
 
+    let (zeroes, difficulty) = get_difficulty(&host_hash_out);
+
     if host_found > 0 {
-        tx.send(FoundAnswerResponse {
-            nonce: nonce[0..16].to_vec(),
-            answer: host_hash_out.to_vec(),
-            difficulty: *expected_diff as u128,
-            zeroes: 0 // Calculation of leading zeros needed here
-        }).unwrap();
+
+        if zeroes > *expected_zeroes as u128 || (zeroes == *expected_zeroes as u128 && difficulty  < *expected_diff  as u128) {
+            tx.send(FoundAnswerResponse {
+                nonce: nonce[0..16].to_vec(),
+                answer: host_hash_out.to_vec(),
+                difficulty: difficulty,
+                zeroes: zeroes
+            }).unwrap();
+        }
     }
 }
 
@@ -175,6 +180,35 @@ fn worker(json: &str, tx: mpsc::Sender<FoundAnswerResponse>, stream: &Stream) {
 enum FieldValue {
     Bytes(String),
     Int(i32),
+}
+
+pub fn get_difficulty(hash: &[u8]) -> (u128, u128) {
+    // If you want to check that the Vec is the expected length:
+    if hash.len() != 32 {
+        panic!("Expected a hash of length 32, but got {}", hash.len());
+    }
+
+    let mut leading_zeros = 0;
+    let mut difficulty_number = 0;
+
+    for (indx, &chr) in hash.iter().enumerate() {
+        if chr != 0 {
+            if (chr & 0x0F) == chr {
+                leading_zeros += 1;
+                difficulty_number += (chr as u128) * 4096;
+                difficulty_number += (hash[indx + 1] as u128) * 16;
+                difficulty_number += (hash[indx + 2] as u128) / 16;
+                return (leading_zeros, difficulty_number);
+            } else {
+                difficulty_number += (chr as u128) * 256;
+                difficulty_number += hash[indx + 1] as u128;
+                return (leading_zeros, difficulty_number);
+            }
+        } else {
+            leading_zeros += 2;
+        }
+    }
+    (32, 0)
 }
 
 fn extract_fields(input: &str) -> Vec<FieldValue> {
